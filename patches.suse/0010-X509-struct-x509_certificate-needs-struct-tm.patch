@@ -1,0 +1,36 @@
+From ae4684a05d87123de310b69c616922dc993694ca Mon Sep 17 00:00:00 2001
+From: David Howells <dhowells@redhat.com>
+Date: Fri, 30 Aug 2013 16:16:34 +0100
+Subject: [PATCH 10/14] X.509: struct x509_certificate needs struct tm
+ declaring
+Target: opensuse 13.1
+Patch-mainline: fedora 12
+
+struct x509_certificate needs struct tm declaring by #inclusion of linux/time.h
+prior to its definition.
+
+Signed-off-by: David Howells <dhowells@redhat.com>
+Reviewed-by: Kees Cook <keescook@chromium.org>
+Reviewed-by: Josh Boyer <jwboyer@redhat.com>
+Acked-by: Lee, Chun-Yi <jlee@suse.com>
+
+---
+ crypto/asymmetric_keys/x509_parser.h | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/crypto/asymmetric_keys/x509_parser.h b/crypto/asymmetric_keys/x509_parser.h
+index e583ad0..2d01182 100644
+--- a/crypto/asymmetric_keys/x509_parser.h
++++ b/crypto/asymmetric_keys/x509_parser.h
+@@ -9,6 +9,7 @@
+  * 2 of the Licence, or (at your option) any later version.
+  */
+ 
++#include <linux/time.h>
+ #include <crypto/public_key.h>
+ 
+ struct x509_certificate {
+-- 
+1.8.3.1
+
+
