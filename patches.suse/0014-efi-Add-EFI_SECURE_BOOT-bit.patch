@@ -1,0 +1,44 @@
+From 871b0ed1847c3c5413a4ca72ecf18735858f7708 Mon Sep 17 00:00:00 2001
+From: Josh Boyer <jwboyer@fedoraproject.org>
+Date: Tue, 27 Aug 2013 13:33:03 -0400
+Subject: [PATCH 14/14] efi: Add EFI_SECURE_BOOT bit
+Target: opensuse 13.1
+Patch-mainline: fedora 12
+
+UEFI machines can be booted in Secure Boot mode.  Add a EFI_SECURE_BOOT bit
+for use with efi_enabled.
+
+Signed-off-by: Josh Boyer <jwboyer@fedoraproject.org>
+Acked-by: Lee, Chun-Yi <jlee@suse.com>
+
+---
+ arch/x86/kernel/setup.c | 2 ++
+ include/linux/efi.h     | 1 +
+ 2 files changed, 3 insertions(+)
+
+Index: linux-3.11-openSUSE-13.1/arch/x86/kernel/setup.c
+===================================================================
+--- linux-3.11-openSUSE-13.1.orig/arch/x86/kernel/setup.c
++++ linux-3.11-openSUSE-13.1/arch/x86/kernel/setup.c
+@@ -1129,7 +1129,9 @@ void __init setup_arch(char **cmdline_p)
+ 
+ #ifdef CONFIG_EFI_SECURE_BOOT_SIG_ENFORCE
+ 	if (boot_params.secure_boot) {
++		set_bit(EFI_SECURE_BOOT, &x86_efi_facility);
+ 		enforce_signed_modules();
++		pr_info("Secure boot enabled\n");
+ 	}
+ #endif
+ 
+Index: linux-3.11-openSUSE-13.1/include/linux/efi.h
+===================================================================
+--- linux-3.11-openSUSE-13.1.orig/include/linux/efi.h
++++ linux-3.11-openSUSE-13.1/include/linux/efi.h
+@@ -638,6 +638,7 @@ extern int __init efi_setup_pcdp_console
+ #define EFI_RUNTIME_SERVICES	3	/* Can we use runtime services? */
+ #define EFI_MEMMAP		4	/* Can we use EFI memory map? */
+ #define EFI_64BIT		5	/* Is the firmware 64-bit? */
++#define EFI_SECURE_BOOT		6 /* Are we in Secure Boot mode? */
+ 
+ #ifdef CONFIG_EFI
+ # ifdef CONFIG_X86
