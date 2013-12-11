@@ -1,0 +1,120 @@
+From cad6ff6b429f31611ccb231cfe6adcb69d891352 Mon Sep 17 00:00:00 2001
+From: David Howells <dhowells@redhat.com>
+Date: Fri, 30 Aug 2013 16:15:30 +0100
+Subject: [PATCH 08/14] KEYS: Split public_key_verify_signature() and make
+ available
+Target: opensuse 13.1
+Patch-mainline: fedora 12
+
+Modify public_key_verify_signature() so that it now takes a public_key struct
+rather than a key struct and supply a wrapper that takes a key struct.  The
+wrapper is then used by the asymmetric key subtype and the modified function is
+used by X.509 self-signature checking and can be used by other things also.
+
+Signed-off-by: David Howells <dhowells@redhat.com>
+Reviewed-by: Kees Cook <keescook@chromium.org>
+Reviewed-by: Josh Boyer <jwboyer@redhat.com>
+Acked-by: Lee, Chun-Yi <jlee@suse.com>
+
+---
+ crypto/asymmetric_keys/public_key.c      | 40 +++++++++++++++++++++++++-------
+ crypto/asymmetric_keys/public_key.h      |  6 +++++
+ crypto/asymmetric_keys/x509_public_key.c |  2 +-
+ 3 files changed, 39 insertions(+), 9 deletions(-)
+
+diff --git a/crypto/asymmetric_keys/public_key.c b/crypto/asymmetric_keys/public_key.c
+index 796ce08..49ac8d8 100644
+--- a/crypto/asymmetric_keys/public_key.c
++++ b/crypto/asymmetric_keys/public_key.c
+@@ -86,21 +86,45 @@ EXPORT_SYMBOL_GPL(public_key_destroy);
+ /*
+  * Verify a signature using a public key.
+  */
+-static int public_key_verify_signature(const struct key *key,
+-				       const struct public_key_signature *sig)
++int public_key_verify_signature(const struct public_key *pk,
++				const struct public_key_signature *sig)
+ {
+-	const struct public_key *pk = key->payload.data;
++	const struct public_key_algorithm *algo;
++
++	BUG_ON(!pk);
++	BUG_ON(!pk->mpi[0]);
++	BUG_ON(!pk->mpi[1]);
++	BUG_ON(!sig);
++	BUG_ON(!sig->digest);
++	BUG_ON(!sig->mpi[0]);
++
++	algo = pk->algo;
++	if (!algo) {
++		if (pk->pkey_algo >= PKEY_ALGO__LAST)
++			return -ENOPKG;
++		algo = pkey_algo[pk->pkey_algo];
++		if (!algo)
++			return -ENOPKG;
++	}
+ 
+-	if (!pk->algo->verify_signature)
++	if (!algo->verify_signature)
+ 		return -ENOTSUPP;
+ 
+-	if (sig->nr_mpi != pk->algo->n_sig_mpi) {
++	if (sig->nr_mpi != algo->n_sig_mpi) {
+ 		pr_debug("Signature has %u MPI not %u\n",
+-			 sig->nr_mpi, pk->algo->n_sig_mpi);
++			 sig->nr_mpi, algo->n_sig_mpi);
+ 		return -EINVAL;
+ 	}
+ 
+-	return pk->algo->verify_signature(pk, sig);
++	return algo->verify_signature(pk, sig);
++}
++EXPORT_SYMBOL_GPL(public_key_verify_signature);
++
++static int public_key_verify_signature_2(const struct key *key,
++					 const struct public_key_signature *sig)
++{
++	const struct public_key *pk = key->payload.data;
++	return public_key_verify_signature(pk, sig);
+ }
+ 
+ /*
+@@ -111,6 +135,6 @@ struct asymmetric_key_subtype public_key_subtype = {
+ 	.name			= "public_key",
+ 	.describe		= public_key_describe,
+ 	.destroy		= public_key_destroy,
+-	.verify_signature	= public_key_verify_signature,
++	.verify_signature	= public_key_verify_signature_2,
+ };
+ EXPORT_SYMBOL_GPL(public_key_subtype);
+diff --git a/crypto/asymmetric_keys/public_key.h b/crypto/asymmetric_keys/public_key.h
+index 5e5e356..5c37a22 100644
+--- a/crypto/asymmetric_keys/public_key.h
++++ b/crypto/asymmetric_keys/public_key.h
+@@ -28,3 +28,9 @@ struct public_key_algorithm {
+ };
+ 
+ extern const struct public_key_algorithm RSA_public_key_algorithm;
++
++/*
++ * public_key.c
++ */
++extern int public_key_verify_signature(const struct public_key *pk,
++				       const struct public_key_signature *sig);
+diff --git a/crypto/asymmetric_keys/x509_public_key.c b/crypto/asymmetric_keys/x509_public_key.c
+index fac574c..8cb2f70 100644
+--- a/crypto/asymmetric_keys/x509_public_key.c
++++ b/crypto/asymmetric_keys/x509_public_key.c
+@@ -76,7 +76,7 @@ static int x509_check_signature(const struct public_key *pub,
+ 	if (ret < 0)
+ 		goto error_mpi;
+ 
+-	ret = pub->algo->verify_signature(pub, sig);
++	ret = public_key_verify_signature(pub, sig);
+ 
+ 	pr_debug("Cert Verification: %d\n", ret);
+ 
+-- 
+1.8.3.1
+
+
