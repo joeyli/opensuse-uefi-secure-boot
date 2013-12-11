@@ -1,0 +1,437 @@
+From b1e5b74e060add16de8d6005802644fa1700167f Mon Sep 17 00:00:00 2001
+From: David Howells <dhowells@redhat.com>
+Date: Fri, 30 Aug 2013 15:37:54 +0100
+Subject: [PATCH 2/2] KEYS: Add per-user_namespace registers for persistent
+ per-UID kerberos caches
+Target: opensuse 13.1
+Patch-mainline: fedora 12
+
+Add support for per-user_namespace registers of persistent per-UID kerberos
+caches held within the kernel.
+
+This allows the kerberos cache to be retained beyond the life of all a user's
+processes so that the user's cron jobs can work.
+
+The kerberos cache is envisioned as a keyring/key tree looking something like:
+
+	struct user_namespace
+	  \___ .krb_cache keyring		- The register
+		\___ _krb.0 keyring		- Root's Kerberos cache
+		\___ _krb.5000 keyring		- User 5000's Kerberos cache
+		\___ _krb.5001 keyring		- User 5001's Kerberos cache
+			\___ tkt785 big_key	- A ccache blob
+			\___ tkt12345 big_key	- Another ccache blob
+
+Or possibly:
+
+	struct user_namespace
+	  \___ .krb_cache keyring		- The register
+		\___ _krb.0 keyring		- Root's Kerberos cache
+		\___ _krb.5000 keyring		- User 5000's Kerberos cache
+		\___ _krb.5001 keyring		- User 5001's Kerberos cache
+			\___ tkt785 keyring	- A ccache
+				\___ krbtgt/REDHAT.COM@REDHAT.COM big_key
+				\___ http/REDHAT.COM@REDHAT.COM user
+				\___ afs/REDHAT.COM@REDHAT.COM user
+				\___ nfs/REDHAT.COM@REDHAT.COM user
+				\___ krbtgt/KERNEL.ORG@KERNEL.ORG big_key
+				\___ http/KERNEL.ORG@KERNEL.ORG big_key
+
+What goes into a particular Kerberos cache is entirely up to userspace.  Kernel
+support is limited to giving you the Kerberos cache keyring that you want.
+
+The user asks for their Kerberos cache by:
+
+	krb_cache = keyctl_get_krbcache(uid, dest_keyring);
+
+The uid is -1 or the user's own UID for the user's own cache or the uid of some
+other user's cache (requires CAP_SETUID).  This permits rpc.gssd or whatever to
+mess with the cache.
+
+The cache returned is a keyring named "_krb.<uid>" that the possessor can read,
+search, clear, invalidate, unlink from and add links to.  Active LSMs get a
+chance to rule on whether the caller is permitted to make a link.
+
+Each uid's cache keyring is created when it first accessed and is given a
+timeout that is extended each time this function is called so that the keyring
+goes away after a while.  The timeout is configurable by sysctl but defaults to
+three days.
+
+Each user_namespace struct gets a lazily-created keyring that serves as the
+register.  The cache keyrings are added to it.  This means that standard key
+search and garbage collection facilities are available.
+
+The user_namespace struct's register goes away when it does and anything left
+in it is then automatically gc'd.
+
+Signed-off-by: David Howells <dhowells@redhat.com>
+Tested-by: Simo Sorce <simo@redhat.com>
+Cc: Serge E. Hallyn <serge.hallyn@ubuntu.com>
+Cc: Eric W. Biederman <ebiederm@xmission.com>
+Acked-by: Lee, Chun-Yi <jlee@suse.com>
+
+---
+ include/linux/user_namespace.h |   6 ++
+ include/uapi/linux/keyctl.h    |   1 +
+ kernel/user.c                  |   4 +
+ kernel/user_namespace.c        |   6 ++
+ security/keys/Kconfig          |  17 +++++
+ security/keys/Makefile         |   1 +
+ security/keys/compat.c         |   3 +
+ security/keys/internal.h       |   9 +++
+ security/keys/keyctl.c         |   3 +
+ security/keys/persistent.c     | 169 +++++++++++++++++++++++++++++++++++++++++
+ security/keys/sysctl.c         |  11 +++
+ 11 files changed, 230 insertions(+)
+ create mode 100644 security/keys/persistent.c
+
+Index: linux-3.11-openSUSE-13.1/include/linux/user_namespace.h
+===================================================================
+--- linux-3.11-openSUSE-13.1.orig/include/linux/user_namespace.h
++++ linux-3.11-openSUSE-13.1/include/linux/user_namespace.h
+@@ -29,6 +29,12 @@ struct user_namespace {
+ 	unsigned int		proc_inum;
+ 	bool			may_mount_sysfs;
+ 	bool			may_mount_proc;
++
++	/* Register of per-UID persistent keyrings for this namespace */
++#ifdef CONFIG_PERSISTENT_KEYRINGS
++	struct key		*persistent_keyring_register;
++	struct rw_semaphore	persistent_keyring_register_sem;
++#endif
+ };
+ 
+ extern struct user_namespace init_user_ns;
+Index: linux-3.11-openSUSE-13.1/include/uapi/linux/keyctl.h
+===================================================================
+--- linux-3.11-openSUSE-13.1.orig/include/uapi/linux/keyctl.h
++++ linux-3.11-openSUSE-13.1/include/uapi/linux/keyctl.h
+@@ -56,5 +56,6 @@
+ #define KEYCTL_REJECT			19	/* reject a partially constructed key */
+ #define KEYCTL_INSTANTIATE_IOV		20	/* instantiate a partially constructed key */
+ #define KEYCTL_INVALIDATE		21	/* invalidate a key */
++#define KEYCTL_GET_PERSISTENT		22	/* get a user's persistent keyring */
+ 
+ #endif /*  _LINUX_KEYCTL_H */
+Index: linux-3.11-openSUSE-13.1/kernel/user.c
+===================================================================
+--- linux-3.11-openSUSE-13.1.orig/kernel/user.c
++++ linux-3.11-openSUSE-13.1/kernel/user.c
+@@ -53,6 +53,10 @@ struct user_namespace init_user_ns = {
+ 	.proc_inum = PROC_USER_INIT_INO,
+ 	.may_mount_sysfs = true,
+ 	.may_mount_proc = true,
++#ifdef CONFIG_KEYS_KERBEROS_CACHE
++	.krb_cache_register_sem =
++	__RWSEM_INITIALIZER(init_user_ns.krb_cache_register_sem),
++#endif
+ };
+ EXPORT_SYMBOL_GPL(init_user_ns);
+ 
+Index: linux-3.11-openSUSE-13.1/kernel/user_namespace.c
+===================================================================
+--- linux-3.11-openSUSE-13.1.orig/kernel/user_namespace.c
++++ linux-3.11-openSUSE-13.1/kernel/user_namespace.c
+@@ -103,6 +103,9 @@ int create_user_ns(struct cred *new)
+ 
+ 	update_mnt_policy(ns);
+ 
++#ifdef CONFIG_PERSISTENT_KEYRINGS
++	rwsem_init(&ns->persistent_keyring_register_sem);
++#endif
+ 	return 0;
+ }
+ 
+@@ -132,6 +135,9 @@ void free_user_ns(struct user_namespace
+ 
+ 	do {
+ 		parent = ns->parent;
++#ifdef CONFIG_PERSISTENT_KEYRINGS
++		key_put(ns->persistent_keyring_register);
++#endif
+ 		proc_free_inum(ns->proc_inum);
+ 		kmem_cache_free(user_ns_cachep, ns);
+ 		ns = parent;
+Index: linux-3.11-openSUSE-13.1/security/keys/Kconfig
+===================================================================
+--- linux-3.11-openSUSE-13.1.orig/security/keys/Kconfig
++++ linux-3.11-openSUSE-13.1/security/keys/Kconfig
+@@ -20,6 +20,23 @@ config KEYS
+ 
+ 	  If you are unsure as to whether this is required, answer N.
+ 
++config PERSISTENT_KEYRINGS
++	bool "Enable register of persistent per-UID keyrings"
++	depends on KEYS
++	help
++	  This option provides a register of persistent per-UID keyrings,
++	  primarily aimed at Kerberos key storage.  The keyrings are persistent
++	  in the sense that they stay around after all processes of that UID
++	  have exited, not that they survive the machine being rebooted.
++
++	  A particular keyring may be accessed by either the user whose keyring
++	  it is or by a process with administrative privileges.  The active
++	  LSMs gets to rule on which admin-level processes get to access the
++	  cache.
++
++	  Keyrings are created and added into the register upon demand and get
++	  removed if they expire (a default timeout is set upon creation).
++
+ config BIG_KEYS
+ 	tristate "Large payload keys"
+ 	depends on KEYS
+Index: linux-3.11-openSUSE-13.1/security/keys/Makefile
+===================================================================
+--- linux-3.11-openSUSE-13.1.orig/security/keys/Makefile
++++ linux-3.11-openSUSE-13.1/security/keys/Makefile
+@@ -18,6 +18,7 @@ obj-y := \
+ obj-$(CONFIG_KEYS_COMPAT) += compat.o
+ obj-$(CONFIG_PROC_FS) += proc.o
+ obj-$(CONFIG_SYSCTL) += sysctl.o
++obj-$(CONFIG_PERSISTENT_KEYRINGS) += persistent.o
+ 
+ #
+ # Key types
+Index: linux-3.11-openSUSE-13.1/security/keys/compat.c
+===================================================================
+--- linux-3.11-openSUSE-13.1.orig/security/keys/compat.c
++++ linux-3.11-openSUSE-13.1/security/keys/compat.c
+@@ -138,6 +138,9 @@ asmlinkage long compat_sys_keyctl(u32 op
+ 	case KEYCTL_INVALIDATE:
+ 		return keyctl_invalidate_key(arg2);
+ 
++	case KEYCTL_GET_PERSISTENT:
++		return keyctl_get_persistent(arg2, arg3);
++
+ 	default:
+ 		return -EOPNOTSUPP;
+ 	}
+Index: linux-3.11-openSUSE-13.1/security/keys/internal.h
+===================================================================
+--- linux-3.11-openSUSE-13.1.orig/security/keys/internal.h
++++ linux-3.11-openSUSE-13.1/security/keys/internal.h
+@@ -255,6 +255,15 @@ extern long keyctl_invalidate_key(key_se
+ extern long keyctl_instantiate_key_common(key_serial_t,
+ 					  const struct iovec *,
+ 					  unsigned, size_t, key_serial_t);
++#ifdef CONFIG_PERSISTENT_KEYRINGS
++extern long keyctl_get_persistent(uid_t, key_serial_t);
++extern unsigned persistent_keyring_expiry;
++#else
++static inline long keyctl_get_persistent(uid_t uid, key_serial_t destring)
++{
++	return -EOPNOTSUPP;
++}
++#endif
+ 
+ /*
+  * Debugging key validation
+Index: linux-3.11-openSUSE-13.1/security/keys/keyctl.c
+===================================================================
+--- linux-3.11-openSUSE-13.1.orig/security/keys/keyctl.c
++++ linux-3.11-openSUSE-13.1/security/keys/keyctl.c
+@@ -1667,6 +1667,9 @@ SYSCALL_DEFINE5(keyctl, int, option, uns
+ 	case KEYCTL_INVALIDATE:
+ 		return keyctl_invalidate_key((key_serial_t) arg2);
+ 
++	case KEYCTL_GET_PERSISTENT:
++		return keyctl_get_persistent((uid_t)arg2, (key_serial_t)arg3);
++
+ 	default:
+ 		return -EOPNOTSUPP;
+ 	}
+Index: linux-3.11-openSUSE-13.1/security/keys/persistent.c
+===================================================================
+--- /dev/null
++++ linux-3.11-openSUSE-13.1/security/keys/persistent.c
+@@ -0,0 +1,169 @@
++/* General persistent per-UID keyrings register
++ *
++ * Copyright (C) 2013 Red Hat, Inc. All Rights Reserved.
++ * Written by David Howells (dhowells@redhat.com)
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public Licence
++ * as published by the Free Software Foundation; either version
++ * 2 of the Licence, or (at your option) any later version.
++ */
++
++#include <linux/user_namespace.h>
++#include "internal.h"
++
++unsigned persistent_keyring_expiry = 3 * 24 * 3600; /* Expire after 3 days of non-use */
++
++/*
++ * Create the persistent keyring register for the current user namespace.
++ *
++ * Called with the namespace's sem locked for writing.
++ */
++static int key_create_persistent_register(struct user_namespace *ns)
++{
++	struct key *reg = keyring_alloc(".persistent_register",
++					KUIDT_INIT(0), KGIDT_INIT(0),
++					current_cred(),
++					((KEY_POS_ALL & ~KEY_POS_SETATTR) |
++					 KEY_USR_VIEW | KEY_USR_READ),
++					KEY_ALLOC_NOT_IN_QUOTA, NULL);
++	if (IS_ERR(reg))
++		return PTR_ERR(reg);
++
++	ns->persistent_keyring_register = reg;
++	return 0;
++}
++
++/*
++ * Create the persistent keyring for the specified user.
++ *
++ * Called with the namespace's sem locked for writing.
++ */
++static key_ref_t key_create_persistent(struct user_namespace *ns, kuid_t uid,
++				       struct keyring_index_key *index_key)
++{
++	struct key *persistent;
++	key_ref_t reg_ref, persistent_ref;
++
++	if (!ns->persistent_keyring_register) {
++		long err = key_create_persistent_register(ns);
++		if (err < 0)
++			return ERR_PTR(err);
++	} else {
++		reg_ref = make_key_ref(ns->persistent_keyring_register, true);
++		persistent_ref = find_key_to_update(reg_ref, index_key);
++		if (persistent_ref)
++			return persistent_ref;
++	}
++
++	persistent = keyring_alloc(index_key->description,
++				   uid, INVALID_GID, current_cred(),
++				   ((KEY_POS_ALL & ~KEY_POS_SETATTR) |
++				    KEY_USR_VIEW | KEY_USR_READ),
++				   KEY_ALLOC_NOT_IN_QUOTA,
++				   ns->persistent_keyring_register);
++	if (IS_ERR(persistent))
++		return ERR_CAST(persistent);
++
++	return make_key_ref(persistent, true);
++}
++
++/*
++ * Get the persistent keyring for a specific UID and link it to the nominated
++ * keyring.
++ */
++static long key_get_persistent(struct user_namespace *ns, kuid_t uid,
++			       key_ref_t dest_ref)
++{
++	struct keyring_index_key index_key;
++	struct key *persistent;
++	key_ref_t reg_ref, persistent_ref;
++	char buf[32];
++	long ret;
++
++	/* Look in the register if it exists */
++	index_key.type = &key_type_keyring;
++	index_key.description = buf;
++	index_key.desc_len = sprintf(buf, "_persistent.%u", from_kuid(ns, uid));
++
++	if (ns->persistent_keyring_register) {
++		reg_ref = make_key_ref(ns->persistent_keyring_register, true);
++		down_read(&ns->persistent_keyring_register_sem);
++		persistent_ref = find_key_to_update(reg_ref, &index_key);
++		up_read(&ns->persistent_keyring_register_sem);
++
++		if (persistent_ref)
++			goto found;
++	}
++
++	/* It wasn't in the register, so we'll need to create it.  We might
++	 * also need to create the register.
++	 */
++	down_write(&ns->persistent_keyring_register_sem);
++	persistent_ref = key_create_persistent(ns, uid, &index_key);
++	up_write(&ns->persistent_keyring_register_sem);
++	if (!IS_ERR(persistent_ref))
++		goto found;
++
++	return PTR_ERR(persistent_ref);
++
++found:
++	ret = key_task_permission(persistent_ref, current_cred(), KEY_LINK);
++	if (ret == 0) {
++		persistent = key_ref_to_ptr(persistent_ref);
++		ret = key_link(key_ref_to_ptr(dest_ref), persistent);
++		if (ret == 0) {
++			key_set_timeout(persistent, persistent_keyring_expiry);
++			ret = persistent->serial;		
++		}
++	}
++
++	key_ref_put(persistent_ref);
++	return ret;
++}
++
++/*
++ * Get the persistent keyring for a specific UID and link it to the nominated
++ * keyring.
++ */
++long keyctl_get_persistent(uid_t _uid, key_serial_t destid)
++{
++	struct user_namespace *ns = current_user_ns();
++	key_ref_t dest_ref;
++	kuid_t uid;
++	long ret;
++
++	/* -1 indicates the current user */
++	if (_uid == (uid_t)-1) {
++		uid = current_uid();
++	} else {
++		uid = make_kuid(ns, _uid);
++		if (!uid_valid(uid))
++			return -EINVAL;
++
++		/* You can only see your own persistent cache if you're not
++		 * sufficiently privileged.
++		 */
++		if (uid != current_uid() &&
++		    uid != current_suid() &&
++		    uid != current_euid() &&
++		    uid != current_fsuid() &&
++		    !ns_capable(ns, CAP_SETUID))
++			return -EPERM;
++	}
++
++	/* There must be a destination keyring */
++	dest_ref = lookup_user_key(destid, KEY_LOOKUP_CREATE, KEY_WRITE);
++	if (IS_ERR(dest_ref))
++		return PTR_ERR(dest_ref);
++	if (key_ref_to_ptr(dest_ref)->type != &key_type_keyring) {
++		ret = -ENOTDIR;
++		goto out_put_dest;
++	}
++
++	ret = key_get_persistent(ns, uid, dest_ref);
++
++out_put_dest:
++	key_ref_put(dest_ref);
++	return ret;
++}
+Index: linux-3.11-openSUSE-13.1/security/keys/sysctl.c
+===================================================================
+--- linux-3.11-openSUSE-13.1.orig/security/keys/sysctl.c
++++ linux-3.11-openSUSE-13.1/security/keys/sysctl.c
+@@ -61,5 +61,16 @@ ctl_table key_sysctls[] = {
+ 		.extra1 = (void *) &zero,
+ 		.extra2 = (void *) &max,
+ 	},
++#ifdef CONFIG_PERSISTENT_KEYRINGS
++	{
++		.procname = "persistent_keyring_expiry",
++		.data = &persistent_keyring_expiry,
++		.maxlen = sizeof(unsigned),
++		.mode = 0644,
++		.proc_handler = proc_dointvec_minmax,
++		.extra1 = (void *) &zero,
++		.extra2 = (void *) &max,
++	},
++#endif
+ 	{ }
+ };
