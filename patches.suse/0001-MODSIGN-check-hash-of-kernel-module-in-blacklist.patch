@@ -1,0 +1,179 @@
+From 32bc40bb4a9768da78c22a990670cf90f202710a Mon Sep 17 00:00:00 2001
+From: Lee, Chun-Yi <jlee@suse.com>
+Date: Wed, 11 Dec 2013 13:37:29 +0800
+Subject: [PATCH 1/2] MODSIGN: check hash of kernel module in blacklist
+
+Target: opensuse 13.1
+Patch-mainline: Not yet
+
+This patch introduces a blacklist list of kernel module's hash. It check
+the blacklist before checking kernel module signature.
+It didn't limit what hash algorithm used but the module of hash algorithm
+need build-in or put in initrd for verify kernel module in initrd.
+
+Signed-off-by: Lee, Chun-Yi <jlee@suse.com>
+---
+ kernel/module-internal.h |   14 ++++++++
+ kernel/module.c          |    9 +++++-
+ kernel/module_signing.c  |   79 ++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 101 insertions(+), 1 deletions(-)
+
+diff --git a/kernel/module-internal.h b/kernel/module-internal.h
+index 915e123..f1b6477 100644
+--- a/kernel/module-internal.h
++++ b/kernel/module-internal.h
+@@ -9,4 +9,18 @@
+  * 2 of the Licence, or (at your option) any later version.
+  */
+ 
++/*
++ * Module hash.
++ */
++struct module_hash {
++	struct list_head list;  /* list of all hashs */
++	u8 hash;                /* Hash algorithm [enum pkey_hash_algo] */
++	char *hash_name;        /* nams string of hash */
++	size_t size;            /* size of hash */
++	u8 hash_data[];         /* Hash data */
++};
++
++extern struct list_head module_hash_blacklist;
++
++extern int mod_verify_hash(const void *mod, unsigned long modlen);
+ extern int mod_verify_sig(const void *mod, unsigned long *_modlen);
+diff --git a/kernel/module.c b/kernel/module.c
+index 3305511..dd06d8a 100644
+--- a/kernel/module.c
++++ b/kernel/module.c
+@@ -2562,10 +2562,16 @@ static inline void kmemleak_load_module(const struct module *mod,
+ #ifdef CONFIG_MODULE_SIG
+ static int module_sig_check(struct load_info *info)
+ {
+-	int err = -ENOKEY;
++	int err;
+ 	const unsigned long markerlen = sizeof(MODULE_SIG_STRING) - 1;
+ 	const void *mod = info->hdr;
+ 
++	/* check hash of module in blacklist */
++	err = mod_verify_hash(mod, info->len);
++	if (err)
++		goto match_blacklist_hash;
++
++	err = -ENOKEY;
+ 	if (info->len > markerlen &&
+ 	    memcmp(mod + info->len - markerlen, MODULE_SIG_STRING, markerlen) == 0) {
+ 		/* We truncate the module to discard the signature */
+@@ -2578,6 +2584,7 @@ static int module_sig_check(struct load_info *info)
+ 		return 0;
+ 	}
+ 
++match_blacklist_hash:
+ 	/* Not having a signature is only an error if we're strict. */
+ 	if (err < 0 && fips_enabled)
+ 		panic("Module verification failed with error %d in FIPS mode\n",
+diff --git a/kernel/module_signing.c b/kernel/module_signing.c
+index 0a29b40..cd7f441 100644
+--- a/kernel/module_signing.c
++++ b/kernel/module_signing.c
+@@ -11,12 +11,15 @@
+ 
+ #include <linux/kernel.h>
+ #include <linux/err.h>
++#include <linux/module.h>
+ #include <crypto/public_key.h>
+ #include <crypto/hash.h>
+ #include <keys/asymmetric-type.h>
+ #include <keys/system_keyring.h>
+ #include "module-internal.h"
+ 
++LIST_HEAD(module_hash_blacklist);
++
+ /*
+  * Module signature information block.
+  *
+@@ -193,6 +196,82 @@ static struct key *request_asymmetric_key(const char *signer, size_t signer_len,
+ 	return key_ref_to_ptr(key);
+ }
+ 
++int mod_verify_hash(const void *mod, unsigned long modlen)
++{
++	struct module_signature ms;
++	struct module_hash *module_hash;
++	struct crypto_shash *tfm;
++	struct shash_desc *desc;
++	size_t digest_size, desc_size;
++	size_t sig_len;
++	u8 *digest;
++	int ret = 0;
++
++	const unsigned long markerlen = sizeof(MODULE_SIG_STRING) - 1;
++
++	/* truncate the module to discard the signature when it signed */
++	if (modlen > markerlen &&
++	    memcmp(mod + modlen - markerlen, MODULE_SIG_STRING, markerlen) == 0) {
++		modlen -= markerlen;
++		if (modlen <= sizeof(ms))
++			return -EBADMSG;
++		memcpy(&ms, mod + (modlen - sizeof(ms)), sizeof(ms));
++		modlen -= sizeof(ms);
++		sig_len = be32_to_cpu(ms.sig_len);
++		if (sig_len >= modlen)
++			return -EBADMSG;
++		modlen -= sig_len;
++		if ((size_t)ms.signer_len + ms.key_id_len >= modlen)
++			return -EBADMSG;
++		modlen -= (size_t)ms.signer_len + ms.key_id_len;
++	}
++
++	list_for_each_entry(module_hash, &module_hash_blacklist, list) {
++		tfm = crypto_alloc_shash(module_hash->hash_name, 0, 0);
++		if (IS_ERR(tfm)) {
++			printk_once(KERN_WARNING "The %s hash algorithm did "
++				"not load for check blacklisted module hash: "
++				"%*phN\n", module_hash->hash_name,
++				(int) module_hash->size,
++				module_hash->hash_data);
++			continue;
++		}
++
++		desc_size = crypto_shash_descsize(tfm) + sizeof(*desc);
++		digest_size = crypto_shash_digestsize(tfm);
++		digest = kzalloc(digest_size + desc_size, GFP_KERNEL);
++		if (!digest) {
++			pr_err("digest memory buffer allocate fail\n");
++			ret = -ENOMEM;
++			goto error_digest;
++		}
++		desc = (void *)digest + digest_size;
++		desc->tfm = tfm;
++		desc->flags = CRYPTO_TFM_REQ_MAY_SLEEP;
++		ret = crypto_shash_init(desc);
++		if (ret < 0)
++			goto error_shash;
++
++		ret = crypto_shash_finup(desc, mod, modlen, digest);
++		if (ret < 0)
++			goto error_shash;
++
++		if (!memcmp(digest, module_hash->hash_data, digest_size)) {
++			ret = -EKEYREJECTED;
++			pr_info("Module Hash is in MOKx blacklisted: %*phN\n",
++				(int) module_hash->size, module_hash->hash_data);
++		}
++error_shash:
++		kfree(digest);
++error_digest:
++		crypto_free_shash(tfm);
++		if (ret)
++			break;
++	}
++
++	return ret;
++}
++
+ /*
+  * Verify the signature on a module.
+  */
+-- 
+1.6.4.2
+
