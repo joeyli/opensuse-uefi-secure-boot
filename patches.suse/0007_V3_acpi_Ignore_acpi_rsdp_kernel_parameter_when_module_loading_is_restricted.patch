@@ -1,0 +1,40 @@
+From: Matthew Garrett <matthew.garrett@nebula.com>
+Subject: [PATCH V3 07/11] acpi: Ignore acpi_rsdp kernel parameter when module loading is restricted
+Date: Tue,  3 Sep 2013 19:50:14 -0400
+Target: opensuse 13.1
+Patch-mainline: fedora 12
+
+From: Josh Boyer <jwboyer@redhat.com>
+
+This option allows userspace to pass the RSDP address to the kernel, which
+makes it possible for a user to circumvent any restrictions imposed on
+loading modules. Disable it in that case.
+
+Signed-off-by: Josh Boyer <jwboyer@redhat.com>
+Acked-by: Lee, Chun-Yi <jlee@suse.com>
+
+---
+ drivers/acpi/osl.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+Index: linux-3.11-openSUSE-13.1/drivers/acpi/osl.c
+===================================================================
+--- linux-3.11-openSUSE-13.1.orig/drivers/acpi/osl.c
++++ linux-3.11-openSUSE-13.1/drivers/acpi/osl.c
+@@ -45,6 +45,7 @@
+ #include <linux/list.h>
+ #include <linux/jiffies.h>
+ #include <linux/semaphore.h>
++#include <linux/module.h>
+ 
+ #include <asm/io.h>
+ #include <asm/uaccess.h>
+@@ -245,7 +246,7 @@ early_param("acpi_rsdp", setup_acpi_rsdp
+ acpi_physical_address __init acpi_os_get_root_pointer(void)
+ {
+ #ifdef CONFIG_KEXEC
+-	if (acpi_rsdp)
++	if (acpi_rsdp && !secure_modules())
+ 		return acpi_rsdp;
+ #endif
+ 
