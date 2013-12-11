@@ -1,0 +1,37 @@
+From 87854340605a64fcc54109ea415d9e54c45e8533 Mon Sep 17 00:00:00 2001
+From: David Howells <dhowells@redhat.com>
+Date: Fri, 30 Aug 2013 16:15:37 +0100
+Subject: [PATCH 09/14] KEYS: Store public key algo ID in public_key_signature
+ struct
+Target: opensuse 13.1
+Patch-mainline: fedora 12
+
+Store public key algorithm ID in public_key_signature struct for reference
+purposes.  This allows a public_key_signature struct to be embedded in
+struct x509_certificate and other places more easily.
+
+Signed-off-by: David Howells <dhowells@redhat.com>
+Reviewed-by: Kees Cook <keescook@chromium.org>
+Reviewed-by: Josh Boyer <jwboyer@redhat.com>
+Acked-by: Lee, Chun-Yi <jlee@suse.com>
+
+---
+ include/crypto/public_key.h | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/include/crypto/public_key.h b/include/crypto/public_key.h
+index 05778df..b34fda4 100644
+--- a/include/crypto/public_key.h
++++ b/include/crypto/public_key.h
+@@ -90,6 +90,7 @@ struct public_key_signature {
+ 	u8 *digest;
+ 	u8 digest_size;			/* Number of bytes in digest */
+ 	u8 nr_mpi;			/* Occupancy of mpi[] */
++	enum pkey_algo pkey_algo : 8;
+ 	enum pkey_hash_algo pkey_hash_algo : 8;
+ 	union {
+ 		MPI mpi[2];
+-- 
+1.8.3.1
+
+
