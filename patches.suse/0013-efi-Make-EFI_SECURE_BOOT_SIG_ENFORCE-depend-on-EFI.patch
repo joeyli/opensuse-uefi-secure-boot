@@ -1,0 +1,31 @@
+From 4c8824bac8d4284e66c39c365ba84151f2d78e87 Mon Sep 17 00:00:00 2001
+From: Josh Boyer <jwboyer@fedoraproject.org>
+Date: Tue, 27 Aug 2013 13:28:43 -0400
+Subject: [PATCH 13/14] efi: Make EFI_SECURE_BOOT_SIG_ENFORCE depend on EFI
+Target: opensuse 13.1
+Patch-mainline: fedora 12
+
+The functionality of the config option is dependent upon the platform being
+UEFI based.  Reflect this in the config deps.
+
+Signed-off-by: Josh Boyer <jwboyer@fedoraproject.org>
+Acked-by: Lee, Chun-Yi <jlee@suse.com>
+
+---
+ arch/x86/Kconfig | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+Index: linux-3.11-openSUSE-13.1/arch/x86/Kconfig
+===================================================================
+--- linux-3.11-openSUSE-13.1.orig/arch/x86/Kconfig
++++ linux-3.11-openSUSE-13.1/arch/x86/Kconfig
+@@ -1629,7 +1629,8 @@ config EFI_STUB
+ 	  See Documentation/x86/efi-stub.txt for more information.
+ 
+ config EFI_SECURE_BOOT_SIG_ENFORCE
+-        def_bool n
++	def_bool n
++	depends on EFI
+ 	prompt "Force module signing when UEFI Secure Boot is enabled"
+ 	---help---
+ 	  UEFI Secure Boot provides a mechanism for ensuring that the
