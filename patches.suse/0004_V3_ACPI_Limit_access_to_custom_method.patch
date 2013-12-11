@@ -1,0 +1,31 @@
+From: Matthew Garrett <matthew.garrett@nebula.com>
+Subject: [PATCH V3 04/11] ACPI: Limit access to custom_method
+Date: Tue,  3 Sep 2013 19:50:11 -0400
+Target: opensuse 13.1
+Patch-mainline: fedora 12
+
+custom_method effectively allows arbitrary access to system memory, making
+it possible for an attacker to circumvent restrictions on module loading.
+Disable it if any such restrictions have been enabled.
+
+Signed-off-by: Matthew Garrett <matthew.garrett@nebula.com>
+Acked-by: Lee, Chun-Yi <jlee@suse.com>
+
+---
+ drivers/acpi/custom_method.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+Index: linux-3.11-openSUSE-13.1/drivers/acpi/custom_method.c
+===================================================================
+--- linux-3.11-openSUSE-13.1.orig/drivers/acpi/custom_method.c
++++ linux-3.11-openSUSE-13.1/drivers/acpi/custom_method.c
+@@ -29,6 +29,9 @@ static ssize_t cm_write(struct file *fil
+ 	struct acpi_table_header table;
+ 	acpi_status status;
+ 
++	if (secure_modules())
++		return -EPERM;
++
+ 	if (!(*ppos)) {
+ 		/* parse the table header to get the table length */
+ 		if (count <= sizeof(struct acpi_table_header))
