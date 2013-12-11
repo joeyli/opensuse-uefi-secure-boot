@@ -1,0 +1,43 @@
+From: Matthew Garrett <matthew.garrett@nebula.com>
+Subject: [PATCH V3 08/11] kexec: Disable at runtime if the kernel enforces module loading restrictions
+Date: Tue,  3 Sep 2013 19:50:15 -0400
+Target: opensuse 13.1
+Patch-mainline: fedora 12
+
+kexec permits the loading and execution of arbitrary code in ring 0, which
+is something that module signing enforcement is meant to prevent. It makes
+sense to disable kexec in this situation.
+
+Signed-off-by: Matthew Garrett <matthew.garrett@nebula.com>
+Acked-by: Lee, Chun-Yi <jlee@suse.com>
+
+---
+ kernel/kexec.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+Index: linux-3.11-openSUSE-13.1/kernel/kexec.c
+===================================================================
+--- linux-3.11-openSUSE-13.1.orig/kernel/kexec.c
++++ linux-3.11-openSUSE-13.1/kernel/kexec.c
+@@ -32,6 +32,7 @@
+ #include <linux/vmalloc.h>
+ #include <linux/swap.h>
+ #include <linux/syscore_ops.h>
++#include <linux/module.h>
+ 
+ #include <asm/page.h>
+ #include <asm/uaccess.h>
+@@ -982,6 +983,13 @@ SYSCALL_DEFINE4(kexec_load, unsigned lon
+ 		return -EPERM;
+ 
+ 	/*
++	 * kexec can be used to circumvent module loading restrictions, so
++	 * prevent loading in that case
++	 */
++	if (secure_modules())
++		return -EPERM;
++
++	/*
+ 	 * Verify we have a legal set of flags
+ 	 * This leaves us room for future extensions.
+ 	 */
