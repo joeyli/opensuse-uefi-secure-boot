@@ -1,0 +1,229 @@
+From 6b69e5ceb3dfd843e9ef5544146cc53146f27374 Mon Sep 17 00:00:00 2001
+From: Lee, Chun-Yi <jlee@suse.com>
+Date: Wed, 11 Dec 2013 13:47:04 +0800
+Subject: [PATCH 2/2] MODSIGN: load hash blacklist of modules from MOKx
+
+Target: opensuse 13.1
+Patch-mainline: Not yet
+
+This patch add the support to load blacklisted hash or public key from
+MOKx that's maintained by bootloader.
+
+Signed-off-by: Lee, Chun-Yi <jlee@suse.com>
+---
+ include/linux/efi.h   |   12 ++++
+ kernel/modsign_uefi.c |  150 ++++++++++++++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 160 insertions(+), 2 deletions(-)
+
+diff --git a/include/linux/efi.h b/include/linux/efi.h
+index 9e96ab0..54154f8 100644
+--- a/include/linux/efi.h
++++ b/include/linux/efi.h
+@@ -392,6 +392,18 @@ typedef efi_status_t efi_query_variable_store_t(u32 attributes, unsigned long si
+ #define EFI_CERT_SHA256_GUID \
+     EFI_GUID(  0xc1c41626, 0x504c, 0x4092, 0xac, 0xa9, 0x41, 0xf9, 0x36, 0x93, 0x43, 0x28 )
+ 
++#define EFI_CERT_SHA1_GUID \
++    EFI_GUID(  0x826ca512, 0xcf10, 0x4ac9, 0xb1, 0x87, 0xbe, 0x1, 0x49, 0x66, 0x31, 0xbd )
++
++#define EFI_CERT_SHA512_GUID \
++    EFI_GUID(  0x93e0fae, 0xa6c4, 0x4f50, 0x9f, 0x1b, 0xd4, 0x1e, 0x2b, 0x89, 0xc1, 0x9a )
++
++#define EFI_CERT_SHA224_GUID \
++    EFI_GUID(  0xb6e5233, 0xa65c, 0x44c9, 0x94, 0x7, 0xd9, 0xab, 0x83, 0xbf, 0xc8, 0xbd )
++
++#define EFI_CERT_SHA384_GUID \
++    EFI_GUID(  0xff3e5307, 0x9fd0, 0x48c9, 0x85, 0xf1, 0x8a, 0xd5, 0x6c, 0x70, 0x1e, 0x1 )
++
+ #define EFI_CERT_X509_GUID \
+     EFI_GUID(  0xa5c059a1, 0x94e4, 0x4aa7, 0x87, 0xb5, 0xab, 0x15, 0x5c, 0x2b, 0xf0, 0x72 )
+ 
+diff --git a/kernel/modsign_uefi.c b/kernel/modsign_uefi.c
+index ae28b97..c509fa0 100644
+--- a/kernel/modsign_uefi.c
++++ b/kernel/modsign_uefi.c
+@@ -4,10 +4,27 @@
+ #include <linux/err.h>
+ #include <linux/efi.h>
+ #include <linux/slab.h>
++#include <crypto/public_key.h>
+ #include <keys/asymmetric-type.h>
+ #include <keys/system_keyring.h>
+ #include "module-internal.h"
+ 
++struct efi_hash_type {
++	u8 hash;                       /* Hash algorithm [enum pkey_hash_algo] */
++	efi_guid_t efi_cert_guid;       /* EFI_CERT_*_GUID  */
++	char *hash_name;                /* nams string of hash */
++	size_t size;                    /* size of hash */
++};
++
++static const struct efi_hash_type efi_hash_types[] = {
++	{PKEY_HASH_SHA256, EFI_CERT_SHA256_GUID, "sha256", 32},
++	{PKEY_HASH_SHA1, EFI_CERT_SHA1_GUID, "sha1", 20},
++	{PKEY_HASH_SHA512, EFI_CERT_SHA512_GUID, "sha512", 64},
++	{PKEY_HASH_SHA224, EFI_CERT_SHA224_GUID, "sha224", 28},
++	{PKEY_HASH_SHA384, EFI_CERT_SHA384_GUID, "sha384", 48},
++	{PKEY_HASH__LAST}
++};
++
+ static __init int check_ignore_db(void)
+ {
+ 	efi_status_t status;
+@@ -55,6 +72,121 @@ out:
+ 	return db;
+ }
+ 
++static int __init signature_blacklist_func(efi_guid_t efi_cert_guid,
++		const efi_signature_data_t *elem)
++{
++	struct module_hash *module_hash = NULL;
++	int i;
++
++	for (i = 0; efi_hash_types[i].hash < PKEY_HASH__LAST; i++) {
++		struct efi_hash_type type = efi_hash_types[i];
++
++		if (efi_guidcmp(efi_cert_guid, type.efi_cert_guid) != 0)
++			continue;
++
++		module_hash = kzalloc(sizeof(*module_hash) + type.size, GFP_KERNEL);
++		module_hash->hash = type.hash;
++		module_hash->hash_name = type.hash_name;
++		module_hash->size = type.size;
++		memcpy(module_hash->hash_data, elem->signature_data, type.size);
++	}
++
++	if (!module_hash) {
++		pr_err("Problem loading hash of blacklisted module: %pUb\n",
++			&efi_cert_guid);
++		return -ENOTSUPP;
++	} else {
++		pr_notice("Loaded %s hash %*phN to blacklisted modules\n",
++				module_hash->hash_name, (int) module_hash->size,
++				module_hash->hash_data);
++	}
++
++	list_add(&module_hash->list, &module_hash_blacklist);
++
++	return 0;
++}
++
++static int __init parse_efi_signature_list_hash(const void *data, size_t size,
++		efi_guid_t efi_cert_guid,
++		int (*func)(efi_guid_t, const efi_signature_data_t *))
++{
++	unsigned offs = 0;
++	size_t lsize, esize, hsize, elsize;
++
++	pr_debug("-->%s(,%zu)\n", __func__, size);
++
++	while (size > 0) {
++		efi_signature_list_t list;
++		const efi_signature_data_t *elem;
++		if (size < sizeof(list))
++			return -EBADMSG;
++
++		memcpy(&list, data, sizeof(list));
++		pr_debug("LIST[%04x] guid=%pUl ls=%x hs=%x ss=%x\n",
++			offs,
++			list.signature_type.b, list.signature_list_size,
++			list.signature_header_size, list.signature_size);
++
++		lsize = list.signature_list_size;
++		hsize = list.signature_header_size;
++		esize = list.signature_size;
++		elsize = lsize - sizeof(list) - hsize;
++
++		if (lsize > size) {
++			pr_debug("<--%s() = -EBADMSG [overrun @%x]\n",
++						__func__, offs);
++			return -EBADMSG;
++		}
++		if (lsize < sizeof(list) ||
++		    lsize - sizeof(list) < hsize ||
++		    esize < sizeof(*elem) ||
++		    elsize < esize ||
++		    elsize % esize != 0) {
++			pr_debug("- bad size combo @%x\n", offs);
++			return -EBADMSG;
++		}
++
++		if (efi_guidcmp(list.signature_type, efi_cert_guid) != 0) {
++			data += lsize;
++			size -= lsize;
++			offs += lsize;
++			continue;
++		}
++
++		data += sizeof(list) + hsize;
++		size -= sizeof(list) + hsize;
++		offs += sizeof(list) + hsize;
++
++		for (; elsize > 0; elsize -= esize) {
++			elem = data;
++
++			pr_debug("ELEM[%04x]\n", offs);
++			func(efi_cert_guid, elem);
++			data += esize;
++			size -= esize;
++			offs += esize;
++		}
++	}
++
++	return 0;
++}
++
++static int __init parse_efi_signature_list_hashs(const void *data, size_t size,
++		int (*func)(efi_guid_t, const efi_signature_data_t *))
++{
++	int i, rc = 0;
++
++	for (i = 0; !rc && efi_hash_types[i].hash < PKEY_HASH__LAST; i++) {
++		struct efi_hash_type type = efi_hash_types[i];
++		rc = parse_efi_signature_list_hash(data, size, type.efi_cert_guid, func);
++		if (rc)
++			pr_err("Couldn't parse signatures of %s hash: %d\n",
++				type.hash_name, rc);
++	}
++
++	return rc;
++}
++
+ /*
+  *  * Load the certs contained in the UEFI databases
+  *   */
+@@ -62,8 +194,8 @@ static int __init load_uefi_certs(void)
+ {
+ 	efi_guid_t secure_var = EFI_IMAGE_SECURITY_DATABASE_GUID;
+ 	efi_guid_t mok_var = EFI_SHIM_LOCK_GUID;
+-	void *db = NULL, *dbx = NULL, *mok = NULL;
+-	unsigned long dbsize = 0, dbxsize = 0, moksize = 0;
++	void *db = NULL, *dbx = NULL, *mok = NULL, *mokx = NULL;
++	unsigned long dbsize = 0, dbxsize = 0, moksize = 0, mokxsize = 0;
+ 	int ignore_db, rc = 0;
+ 
+ 	/* Check if SB is enabled and just return if not */
+@@ -109,6 +241,20 @@ static int __init load_uefi_certs(void)
+ 		kfree(dbx);
+ 	}
+ 
++	mokx = get_cert_list(L"MokListXRT", &mok_var, &mokxsize);
++	if (!mokx) {
++		pr_info("MODSIGN: Couldn't get UEFI MokListXRT\n");
++	} else {
++		rc = parse_efi_signature_list(mokx, mokxsize,
++			system_blacklist_keyring);
++		if (rc)
++			pr_err("Couldn't parse MokListXRT signatures: %d\n", rc);
++		else
++			parse_efi_signature_list_hashs(mokx, mokxsize,
++					signature_blacklist_func);
++		kfree(mokx);
++	}
++
+ 	return rc;
+ }
+ late_initcall(load_uefi_certs);
+-- 
+1.6.4.2
+
