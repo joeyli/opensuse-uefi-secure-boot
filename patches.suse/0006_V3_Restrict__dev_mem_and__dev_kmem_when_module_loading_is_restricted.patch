@@ -1,0 +1,41 @@
+From: Matthew Garrett <matthew.garrett@nebula.com>
+Subject: [PATCH V3 06/11] Restrict /dev/mem and /dev/kmem when module loading is restricted
+Date: Tue,  3 Sep 2013 19:50:13 -0400
+Target: opensuse 13.1
+Patch-mainline: fedora 12
+
+Allowing users to write to address space makes it possible for the kernel
+to be subverted, avoiding module loading restrictions. Prevent this when
+any restrictions have been imposed on loading modules.
+
+Signed-off-by: Matthew Garrett <matthew.garrett@nebula.com>
+Acked-by: Lee, Chun-Yi <jlee@suse.com>
+
+---
+ drivers/char/mem.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+Index: linux-3.11-openSUSE-13.1/drivers/char/mem.c
+===================================================================
+--- linux-3.11-openSUSE-13.1.orig/drivers/char/mem.c
++++ linux-3.11-openSUSE-13.1/drivers/char/mem.c
+@@ -160,6 +160,9 @@ static ssize_t write_mem(struct file *fi
+ 	unsigned long copied;
+ 	void *ptr;
+ 
++	if (secure_modules())
++		return -EPERM;
++
+ 	if (!valid_phys_addr_range(p, count))
+ 		return -EFAULT;
+ 
+@@ -509,6 +512,9 @@ static ssize_t write_kmem(struct file *f
+ 	char *kbuf; /* k-addr because vwrite() takes vmlist_lock rwlock */
+ 	int err = 0;
+ 
++	if (secure_modules())
++		return -EPERM;
++
+ 	if (p < (unsigned long) high_memory) {
+ 		unsigned long to_write = min_t(unsigned long, count,
+ 					       (unsigned long)high_memory - p);
