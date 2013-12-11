@@ -1,0 +1,35 @@
+From 4a7e7536b9b728f1d912d0e4c047c885c95e13a1 Mon Sep 17 00:00:00 2001
+From: David Howells <dhowells@redhat.com>
+Date: Fri, 30 Aug 2013 15:37:51 +0100
+Subject: [PATCH 03/10] KEYS: key_is_dead() should take a const key pointer
+ argument
+Target: opensuse 13.1
+Patch-mainline: fedora 12
+
+key_is_dead() should take a const key pointer argument as it doesn't modify
+what it points to.
+
+Signed-off-by: David Howells <dhowells@redhat.com>
+Acked-by: Lee, Chun-Yi <jlee@suse.com>
+
+---
+ security/keys/internal.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/security/keys/internal.h b/security/keys/internal.h
+index df971fe..490aef5 100644
+--- a/security/keys/internal.h
++++ b/security/keys/internal.h
+@@ -203,7 +203,7 @@ extern struct key *key_get_instantiation_authkey(key_serial_t target_id);
+ /*
+  * Determine whether a key is dead.
+  */
+-static inline bool key_is_dead(struct key *key, time_t limit)
++static inline bool key_is_dead(const struct key *key, time_t limit)
+ {
+ 	return
+ 		key->flags & ((1 << KEY_FLAG_DEAD) |
+-- 
+1.8.3.1
+
+
