@@ -1,0 +1,75 @@
+From 4dffed72b92a305bcdbb73b719570d8f4ec53f46 Mon Sep 17 00:00:00 2001
+From: David Howells <dhowells@redhat.com>
+Date: Fri, 30 Aug 2013 15:37:52 +0100
+Subject: [PATCH 06/10] KEYS: Search for auth-key by name rather than target
+ key ID
+Target: opensuse 13.1
+Patch-mainline: fedora 12
+
+Search for auth-key by name rather than by target key ID as, in a future
+patch, we'll by searching directly by index key in preference to iteration
+over all keys.
+
+Signed-off-by: David Howells <dhowells@redhat.com>
+Acked-by: Lee, Chun-Yi <jlee@suse.com>
+
+---
+ security/keys/request_key_auth.c | 21 +++++++--------------
+ 1 file changed, 7 insertions(+), 14 deletions(-)
+
+diff --git a/security/keys/request_key_auth.c b/security/keys/request_key_auth.c
+index 8d09852..7495a93 100644
+--- a/security/keys/request_key_auth.c
++++ b/security/keys/request_key_auth.c
+@@ -18,6 +18,7 @@
+ #include <linux/slab.h>
+ #include <asm/uaccess.h>
+ #include "internal.h"
++#include <keys/user-type.h>
+ 
+ static int request_key_auth_instantiate(struct key *,
+ 					struct key_preparsed_payload *);
+@@ -222,33 +223,25 @@ error_alloc:
+ }
+ 
+ /*
+- * See if an authorisation key is associated with a particular key.
+- */
+-static int key_get_instantiation_authkey_match(const struct key *key,
+-					       const void *_id)
+-{
+-	struct request_key_auth *rka = key->payload.data;
+-	key_serial_t id = (key_serial_t)(unsigned long) _id;
+-
+-	return rka->target_key->serial == id;
+-}
+-
+-/*
+  * Search the current process's keyrings for the authorisation key for
+  * instantiation of a key.
+  */
+ struct key *key_get_instantiation_authkey(key_serial_t target_id)
+ {
++	char description[16];
+ 	struct keyring_search_context ctx = {
+ 		.index_key.type		= &key_type_request_key_auth,
++		.index_key.description	= description,
+ 		.cred			= current_cred(),
+-		.match			= key_get_instantiation_authkey_match,
+-		.match_data		= (void *)(unsigned long)target_id,
++		.match			= user_match,
++		.match_data		= description,
+ 		.flags			= KEYRING_SEARCH_LOOKUP_DIRECT,
+ 	};
+ 	struct key *authkey;
+ 	key_ref_t authkey_ref;
+ 
++	sprintf(description, "%x", target_id);
++
+ 	authkey_ref = search_process_keyrings(&ctx);
+ 
+ 	if (IS_ERR(authkey_ref)) {
+-- 
+1.8.3.1
+
+
