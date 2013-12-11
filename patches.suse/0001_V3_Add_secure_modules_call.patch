@@ -1,0 +1,61 @@
+From: Matthew Garrett <matthew.garrett@nebula.com>
+Subject: [PATCH V3 01/11] Add secure_modules() call
+Date: Tue,  3 Sep 2013 19:50:08 -0400
+Target: opensuse 13.1
+Patch-mainline: fedora 12
+
+Provide a single call to allow kernel code to determine whether the system
+has been configured to either disable module loading entirely or to load
+only modules signed with a trusted key.
+
+Signed-off-by: Matthew Garrett <matthew.garrett@nebula.com>
+Acked-by: Lee, Chun-Yi <jlee@suse.com>
+
+---
+ include/linux/module.h |  7 +++++++
+ kernel/module.c        | 10 ++++++++++
+ 2 files changed, 17 insertions(+)
+
+Index: linux-3.11-openSUSE-13.1/include/linux/module.h
+===================================================================
+--- linux-3.11-openSUSE-13.1.orig/include/linux/module.h
++++ linux-3.11-openSUSE-13.1/include/linux/module.h
+@@ -515,6 +515,8 @@ int unregister_module_notifier(struct no
+ 
+ extern void print_modules(void);
+ 
++extern bool secure_modules(void);
++
+ #else /* !CONFIG_MODULES... */
+ 
+ /* Given an address, look for it in the exception tables. */
+@@ -625,6 +627,11 @@ static inline int unregister_module_noti
+ static inline void print_modules(void)
+ {
+ }
++
++static inline bool secure_modules(void)
++{
++	return false;
++}
+ #endif /* CONFIG_MODULES */
+ 
+ #ifdef CONFIG_SYSFS
+Index: linux-3.11-openSUSE-13.1/kernel/module.c
+===================================================================
+--- linux-3.11-openSUSE-13.1.orig/kernel/module.c
++++ linux-3.11-openSUSE-13.1/kernel/module.c
+@@ -3965,3 +3965,13 @@ void module_layout(struct module *mod,
+ }
+ EXPORT_SYMBOL(module_layout);
+ #endif
++
++bool secure_modules(void)
++{
++#ifdef CONFIG_MODULE_SIG
++	return (sig_enforce || modules_disabled);
++#else
++	return modules_disabled;
++#endif
++}
++EXPORT_SYMBOL(secure_modules);
